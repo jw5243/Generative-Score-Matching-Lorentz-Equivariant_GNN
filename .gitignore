@@ -1,0 +1,11 @@
+/*.hdf5
+/.git/
+/checkpoints_gaussian/
+/checkpoints_GSGM/
+/checkpoints_GSGM_d2/
+/checkpoints_toy/
+/checkpoints_toy_gaussian/
+/plots/
+/.ipynb_checkpoints/
+/scripts/.ipynb_checkpoints/
+/scripts/__pycache__/

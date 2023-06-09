@@ -1,0 +1,12 @@
+{
+    'NUM_FEAT':4,
+    'BATCH':512,
+    'LR':0.001,
+    'MAXEPOCH':50,
+    'EARLYSTOP':20,
+    'ACT':'swish',
+    'EMBED':32,
+    'NSTEPS':200,
+    'SNR':0.0,
+    'PART_CNT':2,
+}
