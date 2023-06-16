@@ -9,9 +9,9 @@ from tensorflow.keras import layers
 import numpy as np
 
 
-# tf.keras.backend.set_floatx('float64')
-
-
+"""
+Generates an edge adjacency matrix (fully connected) of shape [batch, num_nodes, 2] and corresponding edge attribute array with just ones
+"""
 def generate_edges(num_nodes, batch_size = 1):
     # Returns an array of edge links corresponding to a fully-connected graph
     rows, cols = [], []
@@ -28,6 +28,9 @@ def generate_edges(num_nodes, batch_size = 1):
     return edges, edge_attr
 
 
+"""
+Computes the (special) relativistic norm x * x = -t^2 + x^2 + y^2 + z^2 or inner product x * y
+"""
 def minkowski_norm_squared(x, y = None):
     c = tf.constant([-1, 1, 1, 1], dtype = tf.float32)  # 64)
     h = c * (x * x) if y is None else c * (x * y)
@@ -35,6 +38,9 @@ def minkowski_norm_squared(x, y = None):
     return h
 
 
+"""
+Returns a keras network with layers in the order of batch_norm, dropout, and a dense layer with given activation
+"""
 def create_ffn(hidden_units, dropout_rate, activation = tf.nn.gelu, name = ""):
     fnn_layers = []
 
@@ -46,10 +52,16 @@ def create_ffn(hidden_units, dropout_rate, activation = tf.nn.gelu, name = ""):
     return tf.keras.Sequential(fnn_layers, name = name)
 
 
+"""
+Renormalizes input to network to avoid divergences in untrained network
+"""
 def normalize(x):
     return tf.math.sign(x) * tf.math.log(x + 1)
 
 
+"""
+Single graph convolution layer with Lorentz equivariance implemented via LorentzNet type structure
+"""
 class GraphConvLayer(layers.Layer):
     def __init__(self,
                  num_particles,
@@ -71,14 +83,17 @@ class GraphConvLayer(layers.Layer):
             self.invariant_feature_mlp = create_ffn(invariant_hidden_units, dropout_rate,
                                                     name = name + "_invariant_feature")
 
-        #self.coordinate_linear_combination_mlp = layers.Dense(self.edge_count, activation = None, use_bias = False)
+        # Returns multiples of node and neighbor contributions to coordinate update (removes spacetime translation equivariance)
         self.a_mlp = layers.Dense(1, activation = tf.nn.gelu, use_bias = True)
         self.b_mlp = layers.Dense(1, activation = tf.nn.gelu, use_bias = True)
 
+    # Adjusts time_embed shape to have the same shape as tensor
     def reshape_time_embedding(self, time_embed, tensor):
         return tf.repeat(tf.expand_dims(time_embed, 1), tensor.shape[1], axis = 1)
 
+    # Computes aggregation of messages and coordinates via unsorted_segment_mean or sum
     def sum_neighbors(self, neighbor_values, segment_ids, num_particles, mean = False):
+        # Must set first index to be the node index since unsorted_segment_* only applies to first index of tensor
         transposed_values = tf.transpose(neighbor_values, (1, 2, 0))
         if mean:
             aggregate_values = tf.math.unsorted_segment_mean(transposed_values, segment_ids,
@@ -86,8 +101,11 @@ class GraphConvLayer(layers.Layer):
         else:
             aggregate_values = tf.math.unsorted_segment_sum(transposed_values, segment_ids,
                                                             num_segments = num_particles)
+            
+        # Apply inverse of permutation of the [batch, node, feature] -> [node, feature, batch] group element
         return tf.transpose(aggregate_values, (2, 0, 1))
 
+    # Computes the messages of neighbors using the message_mlp
     def compute_messages(self, node_invariants, neighbor_invariants, invariants, time_embed, weights = None):
         # node_repesentations shape is [num_edges, embedding_dim].
         time_embedding = self.reshape_time_embedding(time_embed, neighbor_invariants)
@@ -97,52 +115,42 @@ class GraphConvLayer(layers.Layer):
         #    messages = messages * tf.expand_dims(weights, -1)
         return messages
 
+    # Sums over the neighbor messages to yield an aggregated message which is used to update the invariant features
     def aggregate_messages(self, node_indices, neighbor_messages, node_representations):
-        # node_indices shape is [num_edges].
-        # neighbour_messages shape: [num_edges, representation_dim].
-        # node_repesentations shape is [num_nodes, representation_dim]
+        # neighbour_messages shape: [batch, num_edges, representation_dim].
+        # node_repesentations shape is [batch, num_nodes, representation_dim]
         num_nodes = node_representations.shape[1]
-        #transposed_messages = tf.transpose(neighbor_messages, (1, 2, 0))
-        #aggregated_message = tf.math.unsorted_segment_mean(transposed_messages, node_indices[0],
-        #                                                   num_segments = num_nodes)
-
-        #return tf.transpose(aggregated_message, (2, 0, 1))
         return self.sum_neighbors(neighbor_messages, node_indices[0], num_nodes)
 
+    # Update the invariant features using only relativistic invariant quantities like aggregated messages and time_embedding
     def update_invariant_features(self, invariant_features, aggregated_messages, time_embed):
-        # h shape is [num_nodes, representation_dim].
-        # aggregated_messages shape is [num_nodes, representation_dim].
-        # Concatenate the node_repesentations and aggregated_messages.
+        # invariant_features shape is [batch, num_nodes, representation_dim].
+        # aggregated_messages shape is [batch, num_nodes, representation_dim].
         time_embedding = self.reshape_time_embedding(time_embed, invariant_features)
         input = tf.concat([invariant_features, aggregated_messages, time_embedding], axis = 2)
-        # Apply the processing function.
         invariant_features_updated = self.invariant_feature_mlp(input)
         return invariant_features_updated
 
+    # Update the coordinate features in a way that preserves the relativistic structure, 
+    # by only taking linear combinations of four-vectors (which is still a four-vector
     def update_coordinates(self, coordinates, node_coordinates, neighbor_coordinates, messages, node_indices, time_embed):
         num_nodes = coordinates.shape[1]
         time_embedding = self.reshape_time_embedding(time_embed, messages)
         a = self.a_mlp(tf.concat([messages, time_embedding], axis = 2))
         b = self.b_mlp(tf.concat([messages, time_embedding], axis = 2))
-        #coordinate_input = tf.concat([node_coordinates, neighbor_coordinates], axis = 1)
-        #transposed_coordinates = tf.transpose(coordinate_input, (2, 0, 1))
-        #transposed_weighted_coordinate_sum = self.coordinate_linear_combination_mlp(transposed_coordinates)
-        #weighted_coordinate_sum = tf.transpose(transposed_weighted_coordinate_sum, (1, 2, 0))
         input = tf.concat([messages, time_embedding], axis = 2)
-        #coordinate_update = self.coordinate_mlp(input) * weighted_coordinate_sum#neighbor_coordinates
         coordinate_update = self.coordinate_mlp(input) * (a * node_coordinates + b * neighbor_coordinates)
         updated_sum = self.sum_neighbors(coordinate_update, node_indices[0], num_nodes, mean = True)
         return coordinates + updated_sum
 
+    # Calculate relativistic invariant quantities using the four-vectors of the node and neighbor (x*x and x*y)
+    # We apply normalization after so that the network does not diverge
     def compute_invariants(self, coordinates, neighbor_coordinates, node_indices):
         node_coordinates = tf.gather(coordinates, node_indices, batch_dims = 1)
         inner_product = normalize(tf.math.abs(minkowski_norm_squared(node_coordinates, neighbor_coordinates)))
         squared_difference = normalize(tf.math.abs(minkowski_norm_squared(node_coordinates - neighbor_coordinates)))
-        #node_norm = normalize(tf.math.abs(minkowski_norm_squared(node_coordinates)))
-        #neighbor_norm = normalize(tf.math.abs(minkowski_norm_squared(neighbor_coordinates)))
-        #return tf.concat([inner_product, squared_difference, node_norm, neighbor_norm], axis = 2)
-        #return tf.concat([inner_product, squared_difference], axis = 2)
-        return tf.concat([node_coordinates, neighbor_coordinates], axis = 2)
+        return tf.concat([inner_product, squared_difference], axis = 2)
+        #return tf.concat([node_coordinates, neighbor_coordinates], axis = 2)
 
     def call(self, inputs):
         """Process the inputs to produce the node_embeddings.
@@ -154,12 +162,17 @@ class GraphConvLayer(layers.Layer):
         x, h, edges, edge_weights, time_embed = inputs
         # Get node_indices (source) and neighbour_indices (target) from edges.
         node_indices, neighbor_indices = edges[:, :, 0], edges[:, :, 1]
-        # neighbour_features shape is [num_edges, representation_dim].
+        # node_invariants shape is [batch, num_edges, representation_dim]
+        # neighbour_invariants shape is [batch, num_edges, representation_dim].
         node_invariants = tf.gather(h, node_indices, batch_dims = 1)
         neighbor_invariants = tf.gather(h, neighbor_indices, batch_dims = 1)
+        
+        # node_coordinates shape is [batch, num_edges, coordinate_dim = 4]
+        # neighbor_coordinates shape is [batch, num_eddges, coordinate_dim = 4]
         node_coordinates = tf.gather(x, node_indices, batch_dims = 1)
         neighbor_coordinates = tf.gather(x, neighbor_indices, batch_dims = 1)
 
+        # Compute invariants from the node and neighbor coordinates
         invariants = self.compute_invariants(x, neighbor_coordinates, node_indices)
 
         # Prepare the messages of the neighbours.
@@ -170,6 +183,8 @@ class GraphConvLayer(layers.Layer):
         aggregated_messages = self.aggregate_messages(node_indices, neighbor_messages, h)
 
         x_updated = self.update_coordinates(x, node_coordinates, neighbor_coordinates, neighbor_messages, node_indices, time_embed)
+        # Do not update invariant features h in the last layer since the graph output is based on coordinates, 
+        # not invariants, so the last layer invariants are not included in cost function
         if not self.final_layer:
             h_updated = self.update_invariant_features(h, aggregated_messages, time_embed)
             return x_updated, h_updated
@@ -178,6 +193,9 @@ class GraphConvLayer(layers.Layer):
         return x_updated, None
 
 
+"""
+Combines multiple Lorentz equivariant convolution layers together to form the LEGNN network used for generative score-matching
+"""
 class LEGNN(tf.keras.Model):
     def __init__(
             self,
@@ -210,10 +228,11 @@ class LEGNN(tf.keras.Model):
 
         # Unpack graph_info to three elements: node_features, edges, and edge_weight.
         edges, edge_weights = generate_edges(x.shape[1], x.shape[0])
-
         time_embed = self.time_embed_mlp(time)
 
-        h = x#normalize(tf.math.abs(minkowski_norm_squared(x)))
+        # Initialize h with invariants so that h maintains Lorentz invariance throughout network
+        h = normalize(tf.math.abs(minkowski_norm_squared(x)))
+        # Can apply h to any network since h only contains invariant quantities
         h = self.preprocess(h)
         for layer in self.network_layers:
             x, h = layer((x, h, edges, edge_weights, time_embed))

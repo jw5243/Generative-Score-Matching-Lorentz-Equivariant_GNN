@@ -7,7 +7,7 @@ import time
 import utils
 from deepsets import DeepSetsAtt
 #from equivariant_model import LEGNN, generate_edges
-from graph_network import GNN
+#from graph_network import GNN
 from equivariant_network import LEGNN
 
 # tf and friends
@@ -56,9 +56,10 @@ class GSGM_Model(keras.Model):
 
 
         #self.model = keras.Model(inputs=[inputs,inputs_time],outputs=outputs)
-        #self.model = LEGNN(32, 4, 1)
         #self.model = GNN(4, [32, 32])
-        self.model = LEGNN(num_particles, 4, [32, 32, 4], [32, 32, 32], num_layers = 4)
+        # The coordiante_hidden_units [4, 4, 4] must only contain 4's since the fundamental 
+        # representation of the Lorentz group SO(1, 3) is 4 dimensional, otherwise equivariance is lost
+        self.model = LEGNN(num_particles, 4, [4, 4, 4], [32, 32, 32], num_layers = 4)
 
         if self.verbose:
             print(self.model.summary())
